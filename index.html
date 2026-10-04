@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Poker Tracker</title>
+  <meta name="description" content="Track home poker buy-ins, settle up in the fewest payments, and keep a record of who still owes whom.">
+  <meta name="theme-color" content="#1f7a4d">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Poker">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Poker Tracker</h1>
+    <span id="topbar-note" class="topbar-note"></span>
+  </header>
+
+  <main id="view"></main>
+
+  <nav class="tabs" aria-label="Sections">
+    <button type="button" class="tab" data-action="tab" data-tab="game">Game</button>
+    <button type="button" class="tab" data-action="tab" data-tab="debts">Debts <span id="debt-badge" class="badge" hidden></span></button>
+  </nav>
+
+  <div id="sheet" class="sheet" hidden>
+    <div class="sheet-panel" role="dialog" aria-modal="true">
+      <div id="sheet-body"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <input id="import-file" type="file" accept="application/json,.json" hidden>
+
+  <script src="logic.js"></script>
+  <script src="store.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
