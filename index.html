@@ -26,6 +26,7 @@
   <nav class="tabs" aria-label="Sections">
     <button type="button" class="tab" data-action="tab" data-tab="game">Game</button>
     <button type="button" class="tab" data-action="tab" data-tab="debts">Debts <span id="debt-badge" class="badge" hidden></span></button>
+    <button type="button" class="tab" data-action="tab" data-tab="history">History</button>
   </nav>
 
   <div id="sheet" class="sheet" hidden>
@@ -37,8 +38,10 @@
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   <input id="import-file" type="file" accept="application/json,.json" hidden>
 
+  <script src="config.js"></script>
   <script src="logic.js"></script>
   <script src="store.js"></script>
+  <script src="live.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -174,3 +174,41 @@ In a browser at 375 × 812, served locally (`python -m http.server 8000` inside 
 Installing needs HTTPS on a public address. Options: GitHub Pages (free, permanent link) or Netlify / Cloudflare Pages (free, drag and drop the folder). Then on each phone open the link once: Android taps Install; iPhone uses Share, then Add to Home Screen.
 
 After any later change, bump `CACHE` in `sw.js` so phones pick up the new version.
+
+---
+
+# Version 2: improvements
+
+Built on top of the plan above. Where the two differ, this section is current.
+
+## What changed
+
+| Area | Change |
+|---|---|
+| Buy-ins | Stored as money (`amount`) instead of `halves`, so a buy-in can be Full, Half or any Custom amount. Old saved games are converted on load (`Logic.migrateGame`). |
+| Log | Any entry can be deleted, and a leave's chips edited, through the "⋯" button. A change that would make the log inconsistent is refused with the reason (`Logic.validateLog`). |
+| Chip counter | Chip colours and values are set on the setup screen (`pt.chips`). A "Count" button in the Leave sheet and on the settle screen totals a stack by colour. |
+| Chip splitter | "Split chips between players" on the setup screen: enter the number of players and how many chips of each colour are in the set. It shows a starting stack worth exactly one buy-in for every player, spread as evenly across the colours as the set allows, and what is left in the set (`Logic.dealStacks`). With no buy-in entered, or when the chips cannot make the buy-in exactly, it shows an equal share of the whole set instead (`Logic.splitChips`). The set's counts are remembered in `pt.chips`. |
+| Debts | Part payments; "Simplify" nets all unpaid debts into the fewest payments (`Logic.combineDebts`); "Remind" shares one person's outstanding total. |
+| History | Finished games are kept (`pt.history`) in a third tab with a per-game view and a leaderboard (`Logic.leaderboard`). Backups are version 2 and include history and chip values; version 1 files still import. |
+| Live view | Optional read-only link for the other players (`live.js`, `config.js`, `firebase-rules.json`). Off until a database URL is set. |
+| Names | A name is remembered when a game starts or finishes, so an undone mid-game join leaves nothing behind. |
+
+## Status
+
+| Item | State |
+|---|---|
+| Logic tests (`node tests/logic.test.js`) | Passing |
+| Phases 1 to 5 in the browser at 375 × 812 | Verified |
+| Live view | Verified against a local stand-in that applies the same checks as `firebase-rules.json`: updates reach the viewer, a write with the wrong owner key is refused, the scorer catches up after the database was unreachable. **Not yet run against a real Firebase database.** |
+| Real phone | Not done: share sheet, file export/import dialogs, install prompt |
+| Hosting | Not done |
+
+## Turning on the live view
+
+1. Go to the Firebase console, create a project (free "Spark" plan), and add a **Realtime Database**.
+2. In the database's **Rules** tab, replace the contents with `firebase-rules.json` and publish.
+3. Copy the database URL (it looks like `https://<project>-default-rtdb.firebaseio.com`) into `firebaseUrl` in `config.js`.
+4. Bump `CACHE` in `sw.js` and redeploy.
+
+A "Live link" button then appears on the game screen. The link shows names and amounts to anyone who has it. There is no sign-in, so someone who knew the database address could create junk entries, but could not read or change a real game.

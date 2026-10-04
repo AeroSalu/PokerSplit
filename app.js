@@ -1,5 +1,5 @@
-// Screens, sheets and event handling. Game rules live in logic.js and
-// persistence in store.js.
+// Screens, sheets and event handling. Game rules live in logic.js,
+// persistence in store.js and the optional live view in live.js.
 (function () {
   'use strict';
 
@@ -13,10 +13,20 @@
   let game = Store.loadGame() || newGame('');
   let debts = Store.loadDebts();
   let names = Store.loadNames();
+  let history = Store.loadHistory();
+  let chipDefs = Store.loadChips();
   let tab = 'game';
+  let histView = 'games';
+  let editNames = false;
   let ctx = null; // what the open sheet is for
   let installEvent = null;
   let toastTimer = 0;
+
+  // Read-only live view of someone else's game (?view=<id>).
+  const viewId = new URLSearchParams(location.search).get('view');
+  let viewState = null;
+  let viewLoaded = false;
+  let viewStatus = 'connecting';
 
   function newGame(buyIn) {
     return {
@@ -24,11 +34,13 @@
       buyIn: buyIn,
       date: null,
       nextId: 1,
+      nextEid: 1,
       players: [],
       events: [],
       finalChips: {},
       ticks: {},
-      override: false
+      override: false,
+      live: null
     };
   }
 
@@ -77,13 +89,19 @@
     return p ? p.name : '?';
   }
 
-  function countLabel(halves) {
-    if (halves === 0) return 'Nil';
-    return Logic.formatHalves(halves) + (Math.abs(halves) <= 2 ? ' buy-in' : ' buy-ins');
+  // "1½ buy-ins" when the money is a whole number of half buy-ins, otherwise
+  // the money itself.
+  function putLabel(put, buyIn) {
+    if (put === 0) return 'Nil';
+    const h = (put * 2) / buyIn;
+    if (Number.isInteger(h)) return Logic.formatHalves(h) + (Math.abs(h) <= 2 ? ' buy-in' : ' buy-ins');
+    return (put < 0 ? '−' : '') + money(put) + ' in';
   }
 
-  function sizeWord(halves) {
-    return halves === 1 ? 'a half buy-in' : 'a buy-in';
+  function amountWord(amount) {
+    if (amount === game.buyIn) return 'a buy-in';
+    if (amount * 2 === game.buyIn) return 'a half buy-in';
+    return money(amount);
   }
 
   function cleanName(s) {
@@ -102,6 +120,11 @@
     return id;
   }
 
+  function pushEvent(e) {
+    e.eid = 'e' + game.nextEid++;
+    game.events.push(e);
+  }
+
   function rememberNames(list) {
     list.forEach(function (name) {
       const known = names.some(function (n) { return n.toLowerCase() === name.toLowerCase(); });
@@ -118,13 +141,14 @@
 
   function save() {
     Store.saveGame(game);
+    if (game.live) Live.publish(game.live.id, game.live.key, liveState());
   }
 
   function toast(text) {
     toastEl.textContent = text;
     toastEl.hidden = false;
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { toastEl.hidden = true; }, 2600);
+    toastTimer = setTimeout(function () { toastEl.hidden = true; }, 3500);
   }
 
   function describe(e) {
@@ -132,7 +156,21 @@
     if (e.type !== 'bank' && e.type !== 'transfer') return '';
     const src = e.type === 'bank' ? 'the bank' : playerName(e.from);
     const verb = e.withJoin === 'join' ? ' joined with ' : e.withJoin === 'rejoin' ? ' rejoined with ' : ' took ';
-    return playerName(e.to) + verb + sizeWord(e.halves) + ' from ' + src;
+    return playerName(e.to) + verb + amountWord(e.amount) + ' from ' + src;
+  }
+
+  // Oldest first. A join is folded into the buy-in that came with it.
+  function logLines() {
+    return game.events
+      .filter(function (e) { return e.type !== 'join'; })
+      .map(function (e) { return { eid: e.eid, text: describe(e) }; });
+  }
+
+  function chipPicks(action, picks) {
+    if (!picks.length) return '';
+    return '<div class="chips">' + picks.map(function (n) {
+      return '<button type="button" class="chip" data-action="' + action + '" data-name="' + esc(n) + '">' + esc(n) + '</button>';
+    }).join('') + '</div>';
   }
 
   // ---------- sheets ----------
@@ -140,7 +178,7 @@
   function openSheet(html) {
     sheetBody.innerHTML = html;
     sheet.hidden = false;
-    const first = sheetBody.querySelector('input, textarea');
+    const first = sheetBody.querySelector('[data-focus]');
     if (first) first.focus();
   }
 
@@ -169,15 +207,10 @@
 
     let head;
     if (ctx.kind === 'add') {
-      const picks = unusedNames();
       head =
         '<p class="sheet-title">Add player</p>' +
-        '<input id="join-name" class="input" placeholder="Player name" autocomplete="off" maxlength="24">' +
-        (picks.length
-          ? '<div class="chips">' + picks.map(function (n) {
-              return '<button type="button" class="chip" data-action="join-pick" data-name="' + esc(n) + '">' + esc(n) + '</button>';
-            }).join('') + '</div>'
-          : '');
+        '<input id="join-name" class="input" placeholder="Player name" autocomplete="off" maxlength="24" data-focus>' +
+        chipPicks('join-pick', unusedNames());
     } else {
       head = '<p class="sheet-title">' + (ctx.kind === 'rejoin' ? 'Rejoin: ' : 'Buy-in: ') + esc(playerName(ctx.player)) + '</p>';
     }
@@ -185,15 +218,17 @@
     openSheet(
       head +
       '<div class="seg">' +
-        '<button type="button" data-action="size" data-halves="2" aria-pressed="true">Full · ' + money(game.buyIn) + '</button>' +
-        '<button type="button" data-action="size" data-halves="1" aria-pressed="false">Half · ' + money(game.buyIn / 2) + '</button>' +
+        '<button type="button" data-action="size" data-size="full" aria-pressed="true">Full · ' + money(game.buyIn) + '</button>' +
+        '<button type="button" data-action="size" data-size="half" aria-pressed="false">Half · ' + money(game.buyIn / 2) + '</button>' +
+        '<button type="button" data-action="size" data-size="custom" aria-pressed="false">Custom</button>' +
       '</div>' +
+      '<input id="custom-amount" class="input num" inputmode="numeric" autocomplete="off" placeholder="Amount" hidden>' +
       '<h2>Take it from</h2>' +
       '<div class="sources">' +
         '<button type="button" class="btn" data-action="source" data-src="bank">Bank<span>adds to the bank total</span></button>' +
         others.map(function (p) {
           return '<button type="button" class="btn" data-action="source" data-src="' + p.id + '">' + esc(p.name) +
-            '<span>has ' + esc(countLabel(st.players[p.id].halves).toLowerCase()) + '</span></button>';
+            '<span>has ' + esc(putLabel(st.players[p.id].put, game.buyIn).toLowerCase()) + '</span></button>';
         }).join('') +
       '</div>' +
       '<button type="button" class="btn ghost block" data-action="close-sheet">Cancel</button>'
@@ -201,30 +236,174 @@
   }
 
   function takeBuyIn(src) {
+    let amount = ctx.size === 'half' ? game.buyIn / 2 : game.buyIn;
+    if (ctx.size === 'custom') {
+      amount = parseAmount($('#custom-amount').value);
+      if (!(amount > 0)) { toast('Enter the amount'); return; }
+    }
+
     let id = ctx.player;
     let flag = '';
-
     if (ctx.kind === 'add') {
       const name = cleanName($('#join-name').value);
       const err = nameError(name);
       if (err) { toast(err); return; }
       id = addPlayer(name);
-      rememberNames([name]);
       flag = 'join';
     } else if (ctx.kind === 'rejoin') {
       flag = 'rejoin';
     }
-    if (flag) game.events.push({ type: 'join', player: id });
+    if (flag) pushEvent({ type: 'join', player: id });
 
     const e = src === 'bank'
-      ? { type: 'bank', to: id, halves: ctx.halves }
-      : { type: 'transfer', from: src, to: id, halves: ctx.halves };
+      ? { type: 'bank', to: id, amount: amount }
+      : { type: 'transfer', from: src, to: id, amount: amount };
     if (flag) e.withJoin = flag;
-    game.events.push(e);
+    pushEvent(e);
 
     save();
     closeSheet();
     render();
+  }
+
+  function leaveSheet(id, value) {
+    const st = Logic.deriveState(game);
+    const onTable = st.bankTotal - st.cashedOutTotal;
+    ctx = { kind: 'leave', player: id, max: onTable };
+    openSheet(
+      '<p class="sheet-title">' + esc(playerName(id)) + ' is leaving</p>' +
+      '<form data-form="leave" class="stack">' +
+        '<label class="field" for="leave-chips">Chips they are leaving with</label>' +
+        '<div class="row">' +
+          '<input id="leave-chips" class="input num" inputmode="numeric" autocomplete="off" placeholder="0" data-focus value="' + esc(value == null ? '' : value) + '">' +
+          (chipDefs.length ? '<button type="button" class="btn" data-action="count" data-for="leave">Count</button>' : '') +
+        '</div>' +
+        '<p class="muted small-text">' + money(onTable) + ' is on the table.</p>' +
+        '<button type="submit" class="btn primary block">Confirm</button>' +
+        '<button type="button" class="btn ghost block" data-action="close-sheet">Cancel</button>' +
+      '</form>'
+    );
+  }
+
+  // target: { type: 'leave' | 'settle', player }
+  function countSheet(target) {
+    ctx = { kind: 'count', target: target };
+    openSheet(
+      '<p class="sheet-title">Count chips: ' + esc(playerName(target.player)) + '</p>' +
+      chipDefs.map(function (c, i) {
+        return '<label class="spread"><span>' + esc(c.name) + ' <span class="muted num">× ' + money(c.value) + '</span></span>' +
+          '<input class="input chips-in num" inputmode="numeric" autocomplete="off" placeholder="0" data-count="' + i + '"' + (i ? '' : ' data-focus') + '></label>';
+      }).join('') +
+      '<div class="spread"><span class="field">Total</span><b id="count-total" class="num">0</b></div>' +
+      '<button type="button" class="btn primary block" data-action="count-use">Use total</button>' +
+      '<button type="button" class="btn ghost block" data-action="close-sheet">Cancel</button>'
+    );
+  }
+
+  function countTotal() {
+    let total = 0;
+    sheetBody.querySelectorAll('[data-count]').forEach(function (el) {
+      const n = parseAmount(el.value);
+      if (!isNaN(n)) total += n * chipDefs[Number(el.dataset.count)].value;
+    });
+    return total;
+  }
+
+  // Chip splitter: how many of each colour every player gets from the set.
+  function splitSheet() {
+    ctx = { kind: 'split' };
+    openSheet(
+      '<p class="sheet-title">Split chips between players</p>' +
+      '<label class="spread"><span class="field">Players</span>' +
+        '<input id="split-players" class="input chips-in num" inputmode="numeric" autocomplete="off" placeholder="0" data-split="players" data-focus value="' +
+        (game.players.length >= 2 ? game.players.length : '') + '"></label>' +
+      '<h2>Chips in the set</h2>' +
+      chipDefs.map(function (c, i) {
+        return '<label class="spread"><span>' + esc(c.name) + ' <span class="muted num">× ' + money(c.value) + '</span></span>' +
+          '<input class="input chips-in num" inputmode="numeric" autocomplete="off" placeholder="0" data-split="' + i + '" value="' + (c.count || '') + '"></label>';
+      }).join('') +
+      '<div id="split-out" class="stack"></div>' +
+      '<button type="button" class="btn ghost block" data-action="close-sheet">Close</button>'
+    );
+    updateSplitOut();
+  }
+
+  // Only this part is redrawn while typing, so the inputs keep focus.
+  function updateSplitOut() {
+    const out = $('#split-out');
+    if (!out) return;
+    const players = parseAmount($('#split-players').value);
+    const total = chipDefs.reduce(function (t, c) { return t + (c.count || 0); }, 0);
+    if (!(players > 0) || !total) {
+      out.innerHTML = '<div class="note info">Enter the number of players and how many chips of each colour you have.</div>';
+      return;
+    }
+
+    // With a buy-in entered, every stack is worth exactly one buy-in. Without
+    // one, or when the chips cannot make it, show an equal share of the set.
+    const buyIn = parseAmount(game.buyIn);
+    const deal = buyIn > 0 ? Logic.dealStacks(chipDefs, players, buyIn) : null;
+    const s = deal || Logic.splitChips(chipDefs, players);
+    const chipCount = s.each.reduce(function (t, c) { return t + c.n; }, 0);
+    let note;
+    if (deal) {
+      note = '<div class="note ok"><span>' + chipCount + ' chips worth <b class="num">' + money(s.stack) +
+        '</b>, exactly one buy-in.</span></div>';
+    } else if (buyIn > 0) {
+      note = '<div class="note warn"><span>These chips cannot make a stack worth exactly ' + money(buyIn) + ' for ' + players +
+        ' players. This is an equal share of the whole set instead, worth <b class="num">' + money(s.stack) + '</b> each.</span></div>';
+    } else {
+      note = '<div class="note info"><span>An equal share of the whole set, worth <b class="num">' + money(s.stack) +
+        '</b> each. Enter the buy-in amount first to get stacks worth exactly one buy-in.</span></div>';
+    }
+    const rows = function (list) {
+      return '<ul class="list">' + list.map(function (c) {
+        return '<li><span>' + esc(c.name) + ' <span class="muted num">× ' + money(c.value) + '</span></span>' +
+          '<span class="num">' + c.n + (c.n === 1 ? ' chip' : ' chips') + '</span></li>';
+      }).join('') + '</ul>';
+    };
+
+    out.innerHTML =
+      '<h2>Each player gets</h2>' +
+      (s.each.length
+        ? rows(s.each) + note
+        : '<p class="muted small-text">There are not enough chips to give every player one of any colour.</p>') +
+      (s.left.length
+        ? '<h2>Left in the set</h2>' + rows(s.left) +
+          '<p class="muted small-text">Worth ' + money(s.leftValue) + '. Keep it aside for later buy-ins.</p>'
+        : '<p class="muted small-text">Nothing is left in the set.</p>');
+  }
+
+  // ---------- editing the log ----------
+
+  // Applies a changed event list if the log still makes sense; players left
+  // with no entries are dropped.
+  function applyEvents(events) {
+    const used = {};
+    events.forEach(function (e) {
+      [e.player, e.to, e.from].forEach(function (id) { if (id) used[id] = true; });
+    });
+    const players = game.players.filter(function (p) { return used[p.id]; });
+    const problem = Logic.validateLog({ players: players, events: events });
+    if (problem) { toast('Not changed: ' + problem); return false; }
+
+    game.events = events;
+    game.players = players;
+    Object.keys(game.finalChips).forEach(function (id) { if (!used[id]) delete game.finalChips[id]; });
+    save();
+    closeSheet();
+    render();
+    return true;
+  }
+
+  function deleteEvent(eid) {
+    const i = game.events.findIndex(function (e) { return e.eid === eid; });
+    if (i < 0) return;
+    const next = game.events.slice();
+    // A first buy-in goes together with the join just before it.
+    if (game.events[i].withJoin) next.splice(i - 1, 2);
+    else next.splice(i, 1);
+    applyEvents(next);
   }
 
   // ---------- game tab ----------
@@ -243,8 +422,23 @@
     return '';
   }
 
+  // Remembered names as tap-to-add suggestions, or, while editing, as
+  // tap-to-remove chips so misspelt or duplicate names can be cleared out.
+  function savedNames() {
+    if (!names.length) return '';
+    if (editNames) {
+      return '<p class="muted small-text">Tap a name to remove it from the saved names. Debts and history are not changed.</p>' +
+        '<div class="chips">' + names.map(function (n) {
+          return '<button type="button" class="chip remove" data-action="name-forget" data-name="' + esc(n) + '" aria-label="Remove ' + esc(n) + '">' +
+            esc(n) + ' ✕</button>';
+        }).join('') + '</div>' +
+        '<button type="button" class="btn small" data-action="names-edit">Done</button>';
+    }
+    return chipPicks('setup-pick', unusedNames()) +
+      '<button type="button" class="btn small ghost" data-action="names-edit">Edit saved names</button>';
+  }
+
   function renderSetup() {
-    const picks = unusedNames();
     return installNote() +
       '<section class="card">' +
         '<label class="field" for="buyin">Buy-in amount</label>' +
@@ -256,11 +450,7 @@
           '<input id="new-name" class="input" placeholder="Player name" autocomplete="off" maxlength="24">' +
           '<button type="submit" class="btn">Add</button>' +
         '</form>' +
-        (picks.length
-          ? '<div class="chips">' + picks.map(function (n) {
-              return '<button type="button" class="chip" data-action="setup-pick" data-name="' + esc(n) + '">' + esc(n) + '</button>';
-            }).join('') + '</div>'
-          : '') +
+        savedNames() +
         (game.players.length
           ? '<ul class="list">' + game.players.map(function (p) {
               return '<li><span class="name">' + esc(p.name) + '</span>' +
@@ -268,30 +458,47 @@
             }).join('') + '</ul>'
           : '<p class="muted small-text">Add at least two players. Each starts with one buy-in from the bank.</p>') +
       '</section>' +
-      '<button type="button" class="btn primary block" data-action="start">Start game</button>';
+      '<button type="button" class="btn primary block" data-action="start">Start game</button>' +
+      '<section class="card">' +
+        '<h2>Chip values · optional</h2>' +
+        '<p class="muted small-text">Add each chip colour and its value to count stacks by colour instead of adding them up yourself.</p>' +
+        (chipDefs.length
+          ? '<ul class="list">' + chipDefs.map(function (c, i) {
+              return '<li><div class="who"><span class="name">' + esc(c.name) + '</span><span class="sub num">' + money(c.value) + '</span></div>' +
+                '<button type="button" class="btn small ghost" data-action="chip-remove" data-i="' + i + '">Remove</button></li>';
+            }).join('') + '</ul>'
+          : '') +
+        '<form class="row" data-form="chip-add">' +
+          '<input id="chip-name" class="input" placeholder="Colour" autocomplete="off" maxlength="16" aria-label="Chip colour">' +
+          '<input id="chip-value" class="input num" inputmode="numeric" placeholder="Value" autocomplete="off" aria-label="Chip value">' +
+          '<button type="submit" class="btn">Add</button>' +
+        '</form>' +
+        (chipDefs.length ? '<button type="button" class="btn block" data-action="split">Split chips between players</button>' : '') +
+      '</section>';
   }
 
   function renderPlay() {
     const st = Logic.deriveState(game);
     const seated = game.players.filter(function (p) { return st.players[p.id].seated; });
     const left = game.players.filter(function (p) { return !st.players[p.id].seated; });
-    const bankMoney = (st.bankHalves * game.buyIn) / 2;
-    const lines = game.events.map(describe).filter(Boolean).reverse();
+    const lines = logLines().reverse();
     const last = game.events[game.events.length - 1];
+    const bankLabel = putLabel(st.bankTotal, game.buyIn);
 
     return '<div class="stats">' +
-        '<div class="stat"><b>' + money(bankMoney) + '</b><span>Bank total · ' + esc(countLabel(st.bankHalves).toLowerCase()) + '</span></div>' +
-        '<div class="stat"><b>' + money(bankMoney - st.cashedOutTotal) + '</b><span>On the table</span></div>' +
+        '<div class="stat"><b>' + money(st.bankTotal) + '</b><span>Bank total' +
+          (/buy-in/.test(bankLabel) ? ' · ' + esc(bankLabel) : '') + '</span></div>' +
+        '<div class="stat"><b>' + money(st.bankTotal - st.cashedOutTotal) + '</b><span>On the table</span></div>' +
       '</div>' +
       '<section class="card">' +
         '<div class="spread"><h2>At the table</h2>' +
           '<button type="button" class="btn small" data-action="add-player">Add player</button></div>' +
         (seated.length
           ? '<ul class="list">' + seated.map(function (p) {
-              const h = st.players[p.id].halves;
-              const sub = h < 0
-                ? '<span class="sub pos">' + esc(countLabel(h)) + ' · profit locked ' + money((h * game.buyIn) / 2) + '</span>'
-                : '<span class="sub">' + esc(countLabel(h)) + '</span>';
+              const put = st.players[p.id].put;
+              const sub = put < 0
+                ? '<span class="sub pos">' + esc(putLabel(put, game.buyIn)) + ' · profit locked ' + money(put) + '</span>'
+                : '<span class="sub">' + esc(putLabel(put, game.buyIn)) + '</span>';
               return '<li><div class="who"><span class="name">' + esc(p.name) + '</span>' + sub + '</div>' +
                 '<div class="acts">' +
                   '<button type="button" class="btn small primary" data-action="buyin" data-id="' + p.id + '">Buy-in</button>' +
@@ -303,7 +510,7 @@
       (left.length
         ? '<section class="card"><h2>Left</h2><ul class="list">' + left.map(function (p) {
             const s = st.players[p.id];
-            const net = s.cashedOut - (s.halves * game.buyIn) / 2;
+            const net = s.cashedOut - s.put;
             return '<li><div class="who"><span class="name">' + esc(p.name) + '</span>' +
               '<span class="sub">left with ' + money(s.cashedOut) + ' · <span class="num ' + tone(net) + '">' + signed(net) + '</span></span></div>' +
               '<button type="button" class="btn small ghost" data-action="rejoin" data-id="' + p.id + '">Rejoin</button></li>';
@@ -312,8 +519,14 @@
       '<section class="card">' +
         '<div class="spread"><h2>Log</h2>' +
           '<button type="button" class="btn small ghost" data-action="undo"' + (!last || last.start ? ' disabled' : '') + '>Undo last</button></div>' +
-        '<ul class="log">' + lines.map(function (t) { return '<li>' + esc(t) + '</li>'; }).join('') + '</ul>' +
+        '<ul class="log">' + lines.map(function (l) {
+          return '<li><span>' + esc(l.text) + '</span>' +
+            '<button type="button" class="more" data-action="log-menu" data-eid="' + l.eid + '" aria-label="Change this entry">⋯</button></li>';
+        }).join('') + '</ul>' +
       '</section>' +
+      (Live.enabled
+        ? '<button type="button" class="btn block" data-action="live">' + (game.live ? 'Live link · on' : 'Live link') + '</button>'
+        : '') +
       '<button type="button" class="btn primary block" data-action="to-settle">End game and settle</button>' +
       '<button type="button" class="btn ghost danger block" data-action="discard">Discard game</button>';
   }
@@ -331,14 +544,13 @@
       else { chips[p.id] = v; entered += v; }
     });
 
-    const expected = (st.bankHalves * game.buyIn) / 2;
-    const diff = entered - expected;
+    const diff = entered - st.bankTotal;
     const usable = complete && (diff === 0 || game.override);
     const nets = Logic.computeNets(game, st, chips);
     return {
       complete: complete,
       entered: entered,
-      expected: expected,
+      expected: st.bankTotal,
       diff: diff,
       usable: usable,
       nets: nets,
@@ -358,12 +570,15 @@
           }
           const v = game.finalChips[p.id];
           return '<li><div class="who"><span class="name">' + esc(p.name) + '</span>' +
-            '<span class="sub">' + esc(countLabel(s.halves)) + '</span></div>' +
-            '<input class="input chips-in num" inputmode="numeric" autocomplete="off" placeholder="chips" data-chips="' + p.id + '"' +
-            ' aria-label="Final chips for ' + esc(p.name) + '" value="' + esc(v == null ? '' : v) + '"></li>';
+            '<span class="sub">' + esc(putLabel(s.put, game.buyIn)) + '</span></div>' +
+            '<div class="acts">' +
+              (chipDefs.length ? '<button type="button" class="btn small ghost" data-action="count" data-for="settle" data-id="' + p.id + '">Count</button>' : '') +
+              '<input class="input chips-in num" inputmode="numeric" autocomplete="off" placeholder="chips" data-chips="' + p.id + '"' +
+              ' aria-label="Final chips for ' + esc(p.name) + '" value="' + esc(v == null ? '' : v) + '">' +
+            '</div></li>';
         }).join('') + '</ul>' +
       '</section>' +
-      '<div id="settle-out" style="display:grid;gap:14px"></div>' +
+      '<div id="settle-out" class="stack"></div>' +
       '<button type="button" class="btn ghost block" data-action="to-play">Back to game</button>';
   }
 
@@ -411,23 +626,44 @@
     out.innerHTML = html;
   }
 
-  function resultText(d) {
-    const lines = ['Poker · ' + fmtDate(game.date), 'Buy-in ' + money(game.buyIn), '', 'Results'];
-    d.nets.slice().sort(function (a, b) { return b.amount - a.amount; }).forEach(function (x) {
-      lines.push(playerName(x.id) + '  ' + signed(x.amount));
+  // Plain-text summary of a finished game record (also used for history).
+  function recordText(rec) {
+    const lines = ['Poker · ' + fmtDate(rec.date), 'Buy-in ' + money(rec.buyIn), '', 'Results'];
+    rec.players.slice().sort(function (a, b) { return b.net - a.net; }).forEach(function (p) {
+      lines.push(p.name + '  ' + signed(p.net));
     });
     lines.push('', 'Payments');
-    if (!d.payments.length) lines.push('Nobody owes anything.');
-    d.payments.forEach(function (p) {
-      lines.push(playerName(p.from) + ' pays ' + playerName(p.to) + ' ' + money(p.amount));
+    if (!rec.payments.length) lines.push('Nobody owes anything.');
+    rec.payments.forEach(function (p) {
+      lines.push(p.from + ' pays ' + p.to + ' ' + money(p.amount));
     });
     return lines.join('\n');
+  }
+
+  function buildRecord(d) {
+    const st = Logic.deriveState(game);
+    return {
+      id: Store.newId(),
+      date: game.date || todayISO(),
+      buyIn: game.buyIn,
+      bankTotal: st.bankTotal,
+      players: d.nets.map(function (x) {
+        const put = st.players[x.id].put;
+        return { name: playerName(x.id), put: put, out: x.amount + put, net: x.amount };
+      }),
+      payments: d.payments.map(function (p) {
+        return { from: playerName(p.from), to: playerName(p.to), amount: p.amount };
+      }),
+      log: logLines().map(function (l) { return l.text; })
+    };
   }
 
   function finishGame() {
     const d = settleData();
     if (!d.usable) return;
     const today = todayISO();
+    const rec = buildRecord(d);
+
     d.payments.forEach(function (p) {
       const paid = !!game.ticks[p.from + '>' + p.to];
       debts.unshift({
@@ -435,13 +671,18 @@
         from: playerName(p.from),
         to: playerName(p.to),
         amount: p.amount,
-        gameDate: game.date || today,
+        gameDate: rec.date,
         status: paid ? 'paid' : 'unpaid',
-        paidDate: paid ? today : null
+        paidDate: paid ? today : null,
+        combined: false
       });
     });
     Store.saveDebts(debts);
+    history.unshift(rec);
+    Store.saveHistory(history);
     rememberNames(game.players.map(function (p) { return p.name; }));
+    if (game.live) Live.publish(game.live.id, game.live.key, liveState('finished'));
+
     game = newGame(String(game.buyIn));
     save();
     tab = 'debts';
@@ -452,11 +693,16 @@
 
   // ---------- debts tab ----------
 
+  function unpaidDebts() {
+    return debts.filter(function (d) { return d.status === 'unpaid'; });
+  }
+
   function debtRow(d) {
+    const when = (d.combined ? 'combined ' : '') + fmtDate(d.gameDate);
     if (d.status === 'unpaid') {
       return '<li><div class="who"><span class="name">' + esc(d.from) + ' owes ' + esc(d.to) + '</span>' +
-        '<span class="sub"><span class="num">' + money(d.amount) + '</span> · ' + esc(fmtDate(d.gameDate)) + '</span></div>' +
-        '<button type="button" class="btn small primary" data-action="mark-paid" data-id="' + esc(d.id) + '">Mark paid</button></li>';
+        '<span class="sub"><span class="num">' + money(d.amount) + '</span> · ' + esc(when) + '</span></div>' +
+        '<button type="button" class="btn small primary" data-action="pay" data-id="' + esc(d.id) + '">Mark paid</button></li>';
     }
     return '<li><div class="who"><span class="name">' + esc(d.from) + ' paid ' + esc(d.to) + '</span>' +
       '<span class="sub"><span class="num">' + money(d.amount) + '</span> · paid ' + esc(fmtDate(d.paidDate)) + '</span></div>' +
@@ -467,8 +713,9 @@
   }
 
   function renderDebts() {
-    const unpaid = debts.filter(function (d) { return d.status === 'unpaid'; });
+    const unpaid = unpaidDebts();
     const paid = debts.filter(function (d) { return d.status === 'paid'; });
+    const simpler = Logic.combineDebts(unpaid).length < unpaid.length;
 
     const totals = {};
     unpaid.forEach(function (d) {
@@ -487,12 +734,16 @@
             const parts = [];
             if (t.owes) parts.push('<span class="neg">owes <span class="num">' + money(t.owes) + '</span></span>');
             if (t.owed) parts.push('<span class="pos">is owed <span class="num">' + money(t.owed) + '</span></span>');
-            return '<li><span class="name">' + esc(n) + '</span><span class="small-text">' + parts.join(' · ') + '</span></li>';
+            return '<li><div class="who"><span class="name">' + esc(n) + '</span><span class="sub">' + parts.join(' · ') + '</span></div>' +
+              (t.owes ? '<button type="button" class="btn small ghost" data-action="remind" data-name="' + esc(n) + '">Remind</button>' : '') +
+              '</li>';
           }).join('') + '</ul></section>'
         : '') +
       '<section class="card">' +
-        '<div class="spread"><h2>Unpaid</h2>' +
-          (unpaid.length ? '<button type="button" class="btn small ghost" data-action="share-unpaid">Share</button>' : '') + '</div>' +
+        '<div class="spread"><h2>Unpaid</h2><div class="acts">' +
+          (simpler ? '<button type="button" class="btn small" data-action="simplify">Simplify</button>' : '') +
+          (unpaid.length ? '<button type="button" class="btn small ghost" data-action="share-unpaid">Share</button>' : '') +
+        '</div></div>' +
         (unpaid.length
           ? '<ul class="list">' + unpaid.map(debtRow).join('') + '</ul>'
           : '<p class="muted small-text">No unpaid debts.</p>') +
@@ -503,16 +754,182 @@
           : '<p class="muted small-text">Nothing paid yet.</p>') +
       '</section>' +
       '<section class="card"><h2>Backup</h2>' +
-        '<p class="muted small-text">Debts are stored only on this phone. Export a backup to keep a copy or move to another phone.</p>' +
+        '<p class="muted small-text">Debts, history and chip values are stored only on this phone. Export a backup to keep a copy or move to another phone.</p>' +
         '<div class="row">' +
-          '<button type="button" class="btn" style="flex:1" data-action="export">Export</button>' +
-          '<button type="button" class="btn" style="flex:1" data-action="import">Import</button>' +
+          '<button type="button" class="btn grow" data-action="export">Export</button>' +
+          '<button type="button" class="btn grow" data-action="import">Import</button>' +
         '</div>' +
       '</section>';
   }
 
   function findDebt(id) {
     return debts.find(function (d) { return d.id === id; });
+  }
+
+  function payFull(d) {
+    d.status = 'paid';
+    d.paidDate = todayISO();
+    Store.saveDebts(debts);
+    closeSheet();
+    render();
+  }
+
+  // ---------- history tab ----------
+
+  function renderHistory() {
+    const seg = '<div class="seg">' +
+      '<button type="button" data-action="hist-view" data-view="games" aria-pressed="' + (histView === 'games') + '">Games</button>' +
+      '<button type="button" data-action="hist-view" data-view="board" aria-pressed="' + (histView === 'board') + '">Leaderboard</button>' +
+      '</div>';
+
+    if (!history.length) {
+      return seg + '<section class="card"><p class="muted small-text">Finished games appear here.</p></section>';
+    }
+
+    if (histView === 'board') {
+      return seg + '<section class="card"><h2>All games</h2><ul class="list">' + Logic.leaderboard(history).map(function (r, i) {
+        return '<li><div class="who"><span class="name">' + (i + 1) + '. ' + esc(r.name) + '</span>' +
+          '<span class="sub">' + r.games + (r.games === 1 ? ' game' : ' games') +
+          ' · best <span class="num">' + signed(r.best) + '</span> · worst <span class="num">' + signed(r.worst) + '</span></span></div>' +
+          '<span class="num ' + tone(r.total) + '">' + signed(r.total) + '</span></li>';
+      }).join('') + '</ul></section>';
+    }
+
+    return seg + '<section class="card"><h2>Games</h2><ul class="list">' + history.map(function (g) {
+      const top = g.players.slice().sort(function (a, b) { return b.net - a.net; })[0];
+      return '<li><div class="who"><span class="name">' + esc(fmtDate(g.date)) + '</span>' +
+        '<span class="sub">' + g.players.length + ' players' +
+        (top && top.net > 0 ? ' · ' + esc(top.name) + ' <span class="num">' + signed(top.net) + '</span>' : '') + '</span></div>' +
+        '<button type="button" class="btn small ghost" data-action="hist-open" data-id="' + esc(g.id) + '">View</button></li>';
+    }).join('') + '</ul></section>';
+  }
+
+  function historySheet(g) {
+    ctx = { kind: 'history', id: g.id };
+    openSheet(
+      '<p class="sheet-title">' + esc(fmtDate(g.date)) + ' · buy-in ' + money(g.buyIn) + '</p>' +
+      '<h2>Results</h2><ul class="list">' + g.players.slice().sort(function (a, b) { return b.net - a.net; }).map(function (p) {
+        return '<li><div class="who"><span class="name">' + esc(p.name) + '</span>' +
+          '<span class="sub num">in ' + money(p.put) + ' · out ' + money(p.out) + '</span></div>' +
+          '<span class="num ' + tone(p.net) + '">' + signed(p.net) + '</span></li>';
+      }).join('') + '</ul>' +
+      '<h2>Payments</h2>' + (g.payments.length
+        ? '<ul class="list">' + g.payments.map(function (p) {
+            return '<li><span>' + esc(p.from) + ' pays ' + esc(p.to) + '</span><span class="num">' + money(p.amount) + '</span></li>';
+          }).join('') + '</ul>'
+        : '<p class="muted small-text">Nobody owed anything.</p>') +
+      '<h2>Log</h2><ul class="log">' + g.log.map(function (t) { return '<li><span>' + esc(t) + '</span></li>'; }).join('') + '</ul>' +
+      '<button type="button" class="btn block" data-action="hist-share">Share</button>' +
+      '<button type="button" class="btn ghost danger block" data-action="hist-delete">Delete this game</button>' +
+      '<button type="button" class="btn ghost block" data-action="close-sheet">Close</button>'
+    );
+  }
+
+  // ---------- live view ----------
+
+  function liveState(stage) {
+    stage = stage || game.stage;
+    const st = Logic.deriveState(game);
+    const d = stage === 'play' ? null : settleData();
+    const done = !!(d && d.usable);
+    return {
+      v: 1,
+      stage: stage,
+      date: game.date,
+      buyIn: game.buyIn,
+      bankTotal: st.bankTotal,
+      onTable: st.bankTotal - st.cashedOutTotal,
+      players: game.players.map(function (p) {
+        const s = st.players[p.id];
+        return { name: p.name, put: s.put, seated: s.seated, cashedOut: s.cashedOut };
+      }),
+      log: logLines().reverse().slice(0, 30).map(function (l) { return l.text; }),
+      results: done
+        ? d.nets.map(function (x) { return { name: playerName(x.id), net: x.amount }; })
+            .sort(function (a, b) { return b.net - a.net; })
+        : null,
+      payments: done
+        ? d.payments.map(function (p) { return { from: playerName(p.from), to: playerName(p.to), amount: p.amount }; })
+        : null,
+      updated: Date.now()
+    };
+  }
+
+  function liveLink() {
+    return location.origin + location.pathname + '?view=' + game.live.id;
+  }
+
+  function liveSheet() {
+    ctx = { kind: 'live' };
+    if (!game.live) {
+      openSheet(
+        '<p class="sheet-title">Live link</p>' +
+        '<p class="muted">Creates a link the other players can open to watch this game update on their own phones. They cannot change anything.</p>' +
+        '<p class="muted small-text">Anyone who has the link can see the names and amounts in this game. Updates need an internet connection; scoring carries on without one and catches up later.</p>' +
+        '<button type="button" class="btn primary block" data-action="live-start">Create link</button>' +
+        '<button type="button" class="btn ghost block" data-action="close-sheet">Cancel</button>'
+      );
+      return;
+    }
+    openSheet(
+      '<p class="sheet-title">Live link is on</p>' +
+      '<textarea class="input link-box" readonly rows="3">' + esc(liveLink()) + '</textarea>' +
+      '<button type="button" class="btn primary block" data-action="live-share">Share link</button>' +
+      '<button type="button" class="btn ghost danger block" data-action="live-stop">Stop sharing</button>' +
+      '<button type="button" class="btn ghost block" data-action="close-sheet">Close</button>'
+    );
+  }
+
+  function renderViewer() {
+    if (!Live.enabled || !Live.isId(viewId)) {
+      return '<div class="note warn">This live link is not valid.</div>';
+    }
+    if (!viewState) {
+      if (viewLoaded) return '<div class="note info">Nothing has been shared on this link yet.</div>';
+      return '<div class="note info">' + (viewStatus === 'offline' ? 'Cannot reach the live game. Check your connection.' : 'Connecting…') + '</div>';
+    }
+    const s = viewState;
+    if (s.stage === 'ended') return '<div class="note info">The scorer has stopped sharing this game.</div>';
+
+    const players = s.players || [];
+    const seated = players.filter(function (p) { return p.seated; });
+    const left = players.filter(function (p) { return !p.seated; });
+    const time = new Date(s.updated).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+
+    return (viewStatus === 'offline'
+        ? '<div class="note warn">Connection lost. Showing the last update, from ' + esc(time) + '.</div>'
+        : '<div class="note ok">' + (s.stage === 'finished' ? 'Game finished' : 'Live') + ' · updated ' + esc(time) + '</div>') +
+      '<div class="stats">' +
+        '<div class="stat"><b>' + money(s.bankTotal) + '</b><span>Bank total</span></div>' +
+        '<div class="stat"><b>' + money(s.onTable) + '</b><span>On the table</span></div>' +
+      '</div>' +
+      (s.results
+        ? '<section class="card"><h2>Results</h2><ul class="list">' + s.results.map(function (r) {
+            return '<li><span class="name">' + esc(r.name) + '</span><span class="num ' + tone(r.net) + '">' + signed(r.net) + '</span></li>';
+          }).join('') + '</ul></section>' +
+          '<section class="card"><h2>Payments</h2>' + ((s.payments || []).length
+            ? '<ul class="list">' + s.payments.map(function (p) {
+                return '<li><span>' + esc(p.from) + ' pays ' + esc(p.to) + '</span><span class="num">' + money(p.amount) + '</span></li>';
+              }).join('') + '</ul>'
+            : '<p class="muted small-text">Nobody owes anything.</p>') + '</section>'
+        : '') +
+      '<section class="card"><h2>At the table</h2>' + (seated.length
+        ? '<ul class="list">' + seated.map(function (p) {
+            return '<li><span class="name">' + esc(p.name) + '</span>' +
+              '<span class="' + (p.put < 0 ? 'pos' : 'muted') + '">' + esc(putLabel(p.put, s.buyIn)) + '</span></li>';
+          }).join('') + '</ul>'
+        : '<p class="muted small-text">Nobody is at the table.</p>') + '</section>' +
+      (left.length
+        ? '<section class="card"><h2>Left</h2><ul class="list">' + left.map(function (p) {
+            const net = p.cashedOut - p.put;
+            return '<li><div class="who"><span class="name">' + esc(p.name) + '</span>' +
+              '<span class="sub">left with ' + money(p.cashedOut) + '</span></div>' +
+              '<span class="num ' + tone(net) + '">' + signed(net) + '</span></li>';
+          }).join('') + '</ul></section>'
+        : '') +
+      '<section class="card"><h2>Log</h2><ul class="log">' + (s.log || []).map(function (t) {
+        return '<li><span>' + esc(t) + '</span></li>';
+      }).join('') + '</ul></section>';
   }
 
   // ---------- sharing and backup ----------
@@ -535,7 +952,7 @@
   }
 
   function exportBackup() {
-    const data = JSON.stringify(Store.exportData(debts, names), null, 2);
+    const data = JSON.stringify(Store.exportData(debts, names, history, chipDefs), null, 2);
     const name = 'poker-backup-' + todayISO() + '.json';
     let file = null;
     try { file = new File([data], name, { type: 'application/json' }); } catch (e) { file = null; }
@@ -559,12 +976,17 @@
     if (!data) { toast('That file is not a Poker Tracker backup'); return; }
     confirmSheet(
       'Import backup',
-      'This replaces the ' + debts.length + ' debt records on this phone with ' + data.debts.length + ' from the backup.',
+      'This replaces the debts, history and chip values on this phone (' + debts.length + ' debts, ' + history.length +
+        ' games) with the backup (' + data.debts.length + ' debts, ' + data.history.length + ' games).',
       'Replace',
       function () {
         debts = data.debts;
+        history = data.history;
+        chipDefs = data.chips;
         names = [];
         Store.saveDebts(debts);
+        Store.saveHistory(history);
+        Store.saveChips(chipDefs);
         rememberNames(data.names);
         closeSheet();
         render();
@@ -577,17 +999,24 @@
   // ---------- render ----------
 
   function render() {
+    if (viewId) {
+      $('#topbar-note').textContent = 'Live view';
+      view.innerHTML = renderViewer();
+      return;
+    }
+
     document.querySelectorAll('.tab').forEach(function (b) {
       if (b.dataset.tab === tab) b.setAttribute('aria-current', 'page');
       else b.removeAttribute('aria-current');
     });
-    const unpaid = debts.filter(function (d) { return d.status === 'unpaid'; }).length;
+    const unpaid = unpaidDebts().length;
     const badge = $('#debt-badge');
     badge.hidden = !unpaid;
     badge.textContent = unpaid;
     $('#topbar-note').textContent = tab === 'game' && game.stage !== 'setup' ? 'Buy-in ' + money(game.buyIn) : '';
 
     if (tab === 'debts') view.innerHTML = renderDebts();
+    else if (tab === 'history') view.innerHTML = renderHistory();
     else if (game.stage === 'setup') view.innerHTML = renderSetup();
     else if (game.stage === 'play') view.innerHTML = renderPlay();
     else { view.innerHTML = renderSettle(); updateSettleOut(); }
@@ -620,6 +1049,19 @@
       save();
       render();
     },
+    'names-edit': function () { editNames = !editNames; render(); },
+    'name-forget': function (el) {
+      names = names.filter(function (n) { return n !== el.dataset.name; });
+      Store.saveNames(names);
+      if (!names.length) editNames = false;
+      render();
+    },
+    'split': splitSheet,
+    'chip-remove': function (el) {
+      chipDefs.splice(Number(el.dataset.i), 1);
+      Store.saveChips(chipDefs);
+      render();
+    },
     'start': function () {
       const amount = parseAmount(game.buyIn);
       if (!(amount > 0)) { toast('Enter the buy-in amount'); return; }
@@ -629,60 +1071,75 @@
       game.date = todayISO();
       game.stage = 'play';
       game.players.forEach(function (p) {
-        game.events.push({ type: 'join', player: p.id });
-        game.events.push({ type: 'bank', to: p.id, halves: 2, withJoin: 'join', start: true });
+        pushEvent({ type: 'join', player: p.id });
+        pushEvent({ type: 'bank', to: p.id, amount: amount, withJoin: 'join', start: true });
       });
       rememberNames(game.players.map(function (p) { return p.name; }));
       save();
       render();
     },
 
-    'buyin': function (el) { ctx = { kind: 'buyin', player: el.dataset.id, halves: 2 }; sourceSheet(); },
-    'rejoin': function (el) { ctx = { kind: 'rejoin', player: el.dataset.id, halves: 2 }; sourceSheet(); },
-    'add-player': function () { ctx = { kind: 'add', player: null, halves: 2 }; sourceSheet(); },
+    'buyin': function (el) { ctx = { kind: 'buyin', player: el.dataset.id, size: 'full' }; sourceSheet(); },
+    'rejoin': function (el) { ctx = { kind: 'rejoin', player: el.dataset.id, size: 'full' }; sourceSheet(); },
+    'add-player': function () { ctx = { kind: 'add', player: null, size: 'full' }; sourceSheet(); },
     'join-pick': function (el) { $('#join-name').value = el.dataset.name; },
     'size': function (el) {
-      ctx.halves = Number(el.dataset.halves);
+      ctx.size = el.dataset.size;
       sheetBody.querySelectorAll('.seg button').forEach(function (b) {
         b.setAttribute('aria-pressed', String(b === el));
       });
+      const custom = $('#custom-amount');
+      custom.hidden = ctx.size !== 'custom';
+      if (!custom.hidden) custom.focus();
     },
     'source': function (el) { takeBuyIn(el.dataset.src); },
 
-    'leave': function (el) {
-      const st = Logic.deriveState(game);
-      const onTable = (st.bankHalves * game.buyIn) / 2 - st.cashedOutTotal;
-      ctx = { kind: 'leave', player: el.dataset.id, max: onTable };
-      openSheet(
-        '<p class="sheet-title">' + esc(playerName(el.dataset.id)) + ' is leaving</p>' +
-        '<form data-form="leave" style="display:grid;gap:14px">' +
-          '<label class="field" for="leave-chips">Chips they are leaving with</label>' +
-          '<input id="leave-chips" class="input num" inputmode="numeric" autocomplete="off" placeholder="0">' +
-          '<p class="muted small-text">' + money(onTable) + ' is on the table.</p>' +
-          '<button type="submit" class="btn primary block">Confirm</button>' +
-          '<button type="button" class="btn ghost block" data-action="close-sheet">Cancel</button>' +
-        '</form>'
-      );
+    'leave': function (el) { leaveSheet(el.dataset.id); },
+    'count': function (el) {
+      countSheet(el.dataset.for === 'leave'
+        ? { type: 'leave', player: ctx.player }
+        : { type: 'settle', player: el.dataset.id });
+    },
+    'count-use': function () {
+      const total = countTotal();
+      const target = ctx.target;
+      if (target.type === 'leave') { leaveSheet(target.player, total); return; }
+      game.finalChips[target.player] = String(total);
+      game.ticks = {};
+      game.override = false;
+      save();
+      closeSheet();
+      render();
     },
 
     'undo': function () {
       const last = game.events[game.events.length - 1];
       if (!last || last.start) return;
-      game.events.pop();
-      if (last.withJoin) {
-        game.events.pop(); // the join that came with this buy-in
-        if (last.withJoin === 'join') {
-          game.players = game.players.filter(function (p) { return p.id !== last.to; });
-        }
-      }
-      save();
-      render();
+      deleteEvent(last.eid);
     },
+    'log-menu': function (el) {
+      const e = game.events.find(function (x) { return x.eid === el.dataset.eid; });
+      if (!e) return;
+      ctx = { kind: 'log', eid: e.eid };
+      openSheet(
+        '<p class="sheet-title">' + esc(describe(e)) + '</p>' +
+        (e.type === 'leave'
+          ? '<form data-form="leave-edit" class="stack">' +
+              '<label class="field" for="edit-chips">Chips they left with</label>' +
+              '<div class="row"><input id="edit-chips" class="input num" inputmode="numeric" autocomplete="off" value="' + e.chips + '">' +
+              '<button type="submit" class="btn">Save</button></div></form>'
+          : '') +
+        '<button type="button" class="btn ghost danger block" data-action="log-delete">Delete this entry</button>' +
+        '<button type="button" class="btn ghost block" data-action="close-sheet">Cancel</button>'
+      );
+    },
+    'log-delete': function () { deleteEvent(ctx.eid); },
 
     'to-settle': function () { game.stage = 'settle'; save(); render(); window.scrollTo(0, 0); },
     'to-play': function () { game.stage = 'play'; save(); render(); },
     'discard': function () {
-      confirmSheet('Discard game', 'This game and its log are removed. Debts from earlier games are kept.', 'Discard', function () {
+      confirmSheet('Discard game', 'This game and its log are removed. Debts and history from earlier games are kept.', 'Discard', function () {
+        if (game.live) Live.publish(game.live.id, game.live.key, { v: 1, stage: 'ended', updated: Date.now() });
         game = newGame(String(game.buyIn));
         save();
         closeSheet();
@@ -698,7 +1155,7 @@
     },
     'share-result': function () {
       const d = settleData();
-      if (d.usable) shareText('Poker result', resultText(d));
+      if (d.usable) shareText('Poker result', recordText(buildRecord(d)));
     },
     'finish': function () {
       const d = settleData();
@@ -707,21 +1164,47 @@
       const open = d.payments.length - paid;
       confirmSheet(
         'Finish game',
-        (d.payments.length
-          ? open + ' unpaid and ' + paid + ' paid payment' + (d.payments.length === 1 ? '' : 's') + ' will be saved under Debts. '
-          : '') + 'The table is then cleared for a new game.',
+        (d.payments.length ? open + ' unpaid and ' + paid + ' paid will be saved under Debts. ' : '') +
+          'The game goes into History and the table is cleared.',
         'Finish game',
         finishGame
       );
     },
 
-    'mark-paid': function (el) {
+    'live': liveSheet,
+    'live-start': function () {
+      game.live = { id: Live.newId(), key: Live.newId() };
+      save();
+      render();
+      liveSheet();
+    },
+    'live-share': function () { shareText('Poker live link', liveLink()); },
+    'live-stop': function () {
+      Live.publish(game.live.id, game.live.key, { v: 1, stage: 'ended', updated: Date.now() });
+      game.live = null;
+      save();
+      closeSheet();
+      render();
+    },
+
+    'pay': function (el) {
       const d = findDebt(el.dataset.id);
       if (!d) return;
-      d.status = 'paid';
-      d.paidDate = todayISO();
-      Store.saveDebts(debts);
-      render();
+      ctx = { kind: 'pay', id: d.id };
+      openSheet(
+        '<p class="sheet-title">' + esc(d.from) + ' owes ' + esc(d.to) + ' ' + money(d.amount) + '</p>' +
+        '<button type="button" class="btn primary block" data-action="pay-full">Paid in full</button>' +
+        '<form data-form="pay-part" class="stack">' +
+          '<label class="field" for="part-amount">Or record a part payment</label>' +
+          '<div class="row"><input id="part-amount" class="input num" inputmode="numeric" autocomplete="off" placeholder="Amount paid">' +
+          '<button type="submit" class="btn">Record</button></div>' +
+        '</form>' +
+        '<button type="button" class="btn ghost block" data-action="close-sheet">Cancel</button>'
+      );
+    },
+    'pay-full': function () {
+      const d = findDebt(ctx.id);
+      if (d) payFull(d);
     },
     'unmark': function (el) {
       const d = findDebt(el.dataset.id);
@@ -741,15 +1224,77 @@
         render();
       }, true);
     },
+    'simplify': function () {
+      const unpaid = unpaidDebts();
+      const combined = Logic.combineDebts(unpaid);
+      ctx = {
+        kind: 'confirm',
+        run: function () {
+          const today = todayISO();
+          const fresh = combined.map(function (p) {
+            return {
+              id: Store.newId(), from: p.from, to: p.to, amount: p.amount,
+              gameDate: today, status: 'unpaid', paidDate: null, combined: true
+            };
+          });
+          debts = fresh.concat(debts.filter(function (d) { return d.status === 'paid'; }));
+          Store.saveDebts(debts);
+          closeSheet();
+          render();
+        }
+      };
+      openSheet(
+        '<p class="sheet-title">Simplify unpaid debts</p>' +
+        '<p class="muted">' + unpaid.length + ' unpaid debts become ' + combined.length +
+          (combined.length === 1 ? ' payment' : ' payments') + '. Everyone ends up paying or receiving the same total.</p>' +
+        (combined.length
+          ? '<ul class="list">' + combined.map(function (p) {
+              return '<li><span>' + esc(p.from) + ' owes ' + esc(p.to) + '</span><span class="num">' + money(p.amount) + '</span></li>';
+            }).join('') + '</ul>'
+          : '<p class="small-text">The debts cancel out completely.</p>') +
+        '<p class="muted small-text">The separate debts are replaced. Each night’s own payments stay in History.</p>' +
+        '<button type="button" class="btn primary block" data-action="confirm-yes">Replace with these</button>' +
+        '<button type="button" class="btn ghost block" data-action="close-sheet">Cancel</button>'
+      );
+    },
+    'remind': function (el) {
+      const name = el.dataset.name;
+      const owed = unpaidDebts().filter(function (d) { return d.from === name; });
+      const total = owed.reduce(function (t, d) { return t + d.amount; }, 0);
+      const lines = [name + ', you owe ' + money(total) + ' from poker:'];
+      owed.forEach(function (d) {
+        lines.push(money(d.amount) + ' to ' + d.to + ' (' + fmtDate(d.gameDate) + ')');
+      });
+      shareText('Poker reminder', lines.join('\n'));
+    },
     'share-unpaid': function () {
       const lines = ['Poker debts still unpaid'];
-      debts.filter(function (d) { return d.status === 'unpaid'; }).forEach(function (d) {
+      unpaidDebts().forEach(function (d) {
         lines.push(d.from + ' owes ' + d.to + ' ' + money(d.amount) + ' (' + fmtDate(d.gameDate) + ')');
       });
       shareText('Unpaid poker debts', lines.join('\n'));
     },
     'export': exportBackup,
-    'import': function () { importInput.click(); }
+    'import': function () { importInput.click(); },
+
+    'hist-view': function (el) { histView = el.dataset.view; render(); },
+    'hist-open': function (el) {
+      const g = history.find(function (x) { return x.id === el.dataset.id; });
+      if (g) historySheet(g);
+    },
+    'hist-share': function () {
+      const g = history.find(function (x) { return x.id === ctx.id; });
+      if (g) shareText('Poker result', recordText(g));
+    },
+    'hist-delete': function () {
+      const id = ctx.id;
+      confirmSheet('Delete game', 'This game is removed from History and the leaderboard. Debts are not changed.', 'Delete', function () {
+        history = history.filter(function (x) { return x.id !== id; });
+        Store.saveHistory(history);
+        closeSheet();
+        render();
+      }, true);
+    }
   };
 
   const forms = {
@@ -762,12 +1307,47 @@
       render();
       $('#new-name').focus();
     },
+    'chip-add': function () {
+      const name = cleanName($('#chip-name').value).slice(0, 16);
+      const value = parseAmount($('#chip-value').value);
+      if (!name) { toast('Enter the chip colour'); return; }
+      if (!(value > 0)) { toast('Enter the chip value'); return; }
+      chipDefs.push({ name: name, value: value, count: 0 });
+      chipDefs.sort(function (a, b) { return a.value - b.value; });
+      Store.saveChips(chipDefs);
+      render();
+      $('#chip-name').focus();
+    },
     'leave': function () {
       const chips = parseAmount($('#leave-chips').value);
       if (isNaN(chips)) { toast('Enter their chips as a whole number'); return; }
       if (chips > ctx.max) { toast('Only ' + money(ctx.max) + ' is on the table'); return; }
-      game.events.push({ type: 'leave', player: ctx.player, chips: chips });
+      pushEvent({ type: 'leave', player: ctx.player, chips: chips });
       save();
+      closeSheet();
+      render();
+    },
+    'leave-edit': function () {
+      const chips = parseAmount($('#edit-chips').value);
+      if (isNaN(chips)) { toast('Enter their chips as a whole number'); return; }
+      const eid = ctx.eid;
+      applyEvents(game.events.map(function (e) {
+        return e.eid === eid ? Object.assign({}, e, { chips: chips }) : e;
+      }));
+    },
+    'pay-part': function () {
+      const d = findDebt(ctx.id);
+      if (!d) return;
+      const part = parseAmount($('#part-amount').value);
+      if (!(part > 0)) { toast('Enter the amount paid'); return; }
+      if (part > d.amount) { toast('That is more than the ' + money(d.amount) + ' owed'); return; }
+      if (part === d.amount) { payFull(d); return; }
+      d.amount -= part;
+      debts.splice(debts.indexOf(d) + 1, 0, {
+        id: Store.newId(), from: d.from, to: d.to, amount: part,
+        gameDate: d.gameDate, status: 'paid', paidDate: todayISO(), combined: d.combined
+      });
+      Store.saveDebts(debts);
       closeSheet();
       render();
     }
@@ -798,6 +1378,15 @@
       game.override = false;
       save();
       updateSettleOut();
+    } else if (el.dataset && el.dataset.count) {
+      $('#count-total').textContent = money(countTotal());
+    } else if (el.dataset && el.dataset.split) {
+      if (el.dataset.split !== 'players') {
+        const n = parseAmount(el.value);
+        chipDefs[Number(el.dataset.split)].count = isNaN(n) ? 0 : n;
+        Store.saveChips(chipDefs);
+      }
+      updateSplitOut();
     }
   });
 
@@ -815,11 +1404,25 @@
     e.preventDefault();
     installEvent = e;
     const typing = document.activeElement && document.activeElement.tagName === 'INPUT';
-    if (tab === 'game' && game.stage === 'setup' && !typing) render();
+    if (!viewId && tab === 'game' && game.stage === 'setup' && !typing) render();
   });
 
   if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
     navigator.serviceWorker.register('sw.js').catch(function () {});
+  }
+
+  if (viewId) {
+    document.body.classList.add('viewer');
+    if (Live.enabled && Live.isId(viewId)) {
+      Live.watch(viewId, function (state) {
+        viewState = state;
+        viewLoaded = true;
+        render();
+      }, function (status) {
+        viewStatus = status;
+        render();
+      });
+    }
   }
 
   render();

@@ -1,0 +1,22 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "live": {
+      "$id": {
+        ".write": "!data.exists() || data.child('owner').val() === newData.child('owner').val()",
+        ".validate": "newData.hasChildren(['owner', 'state']) && $id.matches(/^[a-f0-9]{32}$/)",
+        "owner": {
+          ".validate": "newData.isString() && newData.val().length === 32"
+        },
+        "state": {
+          ".read": true,
+          ".validate": "newData.isString() && newData.val().length < 20000"
+        },
+        "$other": {
+          ".validate": false
+        }
+      }
+    }
+  }
+}
