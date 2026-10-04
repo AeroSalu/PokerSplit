@@ -1,6 +1,6 @@
 // Caches the app so it opens with no signal. Cached files are served straight
 // away and refreshed in the background, so an update shows on the next open.
-const CACHE = 'poker-tracker-v5';
+const CACHE = 'poker-tracker-v10';
 const FILES = [
   './',
   'index.html',

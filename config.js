@@ -5,5 +5,5 @@
 // Leave it empty to keep the app fully offline; the live-link button is then
 // hidden. The database must use the rules in firebase-rules.json.
 self.POKER_CONFIG = {
-  firebaseUrl: ''
+  firebaseUrl: 'https://pokersplit-da1da-default-rtdb.asia-southeast1.firebasedatabase.app'
 };

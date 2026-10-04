@@ -9,6 +9,7 @@
   const sheetBody = $('#sheet-body');
   const toastEl = $('#toast');
   const importInput = $('#import-file');
+  const photoInput = $('#photo-file');
 
   let game = Store.loadGame() || newGame('');
   let debts = Store.loadDebts();
@@ -18,6 +19,8 @@
   let tab = 'game';
   let histView = 'games';
   let editNames = false;
+  let photos = Store.loadPhotos(); // lower-cased name -> small image data URL
+  let flash = {}; // player ids whose row should pulse on the next render
   let ctx = null; // what the open sheet is for
   let installEvent = null;
   let toastTimer = 0;
@@ -173,6 +176,109 @@
     }).join('') + '</div>';
   }
 
+  const ICONS = {
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    undo: '<path d="M9 14l-4-4 4-4"/><path d="M5 10h9a5 5 0 0 1 0 10h-3"/>',
+    share: '<path d="M12 15V3M8 7l4-4 4 4M5 13v6h14v-6"/>',
+    trophy: '<path d="M8 4h8v5a4 4 0 0 1-8 0V4z"/><path d="M8 6H5a3 3 0 0 0 3 3M16 6h3a3 3 0 0 1-3 3M12 13v4M8 20h8"/>',
+    link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3A4 4 0 0 0 13 5.3l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3A4 4 0 0 0 11 18.7l1-1"/>',
+    chip: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/>',
+    down: '<path d="M12 4v11M8 11l4 4 4-4M5 20h14"/>',
+    up: '<path d="M12 16V5M8 9l4-4 4 4M5 20h14"/>',
+    camera: '<path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/>'
+  };
+
+  // Decorative only: every button that uses one keeps its text label.
+  function icon(name) {
+    return '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">' + ICONS[name] + '</svg>';
+  }
+
+  const HUES = [8, 28, 48, 150, 185, 215, 265, 320];
+
+  function initials(name) {
+    const words = name.trim().split(/\s+/);
+    return ((words[0] || '?').charAt(0) + (words.length > 1 ? words[words.length - 1].charAt(0) : '')).toUpperCase();
+  }
+
+  // The same name always gets the same colour.
+  function hueOf(name) {
+    const key = name.toLowerCase();
+    let h = 0;
+    for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
+    return HUES[h % HUES.length];
+  }
+
+  // The player's photo if one is saved, otherwise their initials. With `tap`
+  // it is a button that opens the photo sheet.
+  function avatar(name, tap, big) {
+    const photo = photos[name.toLowerCase()];
+    const cls = 'avatar' + (big ? ' big' : '');
+    const inner = photo ? '<img src="' + esc(photo) + '" alt="">' : esc(initials(name));
+    const style = photo ? '' : ' style="--hue:' + hueOf(name) + '"';
+    if (tap) {
+      return '<button type="button" class="' + cls + '"' + style + ' data-action="photo" data-name="' + esc(name) +
+        '" aria-label="Photo for ' + esc(name) + '">' + inner + '</button>';
+    }
+    return '<span class="' + cls + '"' + style + ' aria-hidden="true">' + inner + '</span>';
+  }
+
+  function photoSheet(name) {
+    ctx = { kind: 'photo', name: name };
+    openSheet(
+      '<p class="sheet-title">' + esc(name) + '</p>' +
+      avatar(name, false, true) +
+      '<button type="button" class="btn primary block" data-action="photo-pick">' + icon('camera') + 'Choose photo</button>' +
+      (photos[name.toLowerCase()]
+        ? '<button type="button" class="btn ghost danger block" data-action="photo-remove">Remove photo</button>'
+        : '') +
+      '<p class="muted small-text">The photo is saved on this phone only and is not shown on a live link.</p>' +
+      '<button type="button" class="btn ghost block" data-action="close-sheet">Close</button>'
+    );
+  }
+
+  // Centre-crops the picture to a small square so it takes little storage.
+  function savePhoto(file, name) {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = function () {
+      const size = 96;
+      const side = Math.min(img.naturalWidth, img.naturalHeight);
+      const canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = size;
+      canvas.getContext('2d').drawImage(
+        img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, size, size
+      );
+      URL.revokeObjectURL(url);
+      photos[name.toLowerCase()] = canvas.toDataURL('image/jpeg', 0.82);
+      Store.savePhotos(photos);
+      closeSheet();
+      render();
+    };
+    img.onerror = function () {
+      URL.revokeObjectURL(url);
+      toast('Could not read that picture');
+    };
+    img.src = url;
+  }
+
+  // A short fall of card suits when a game is finished.
+  function celebrate() {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const suits = ['♠', '♥', '♦', '♣'];
+    const box = document.createElement('div');
+    box.className = 'confetti';
+    box.setAttribute('aria-hidden', 'true');
+    let html = '';
+    for (let i = 0; i < 26; i++) {
+      html += '<span style="left:' + Math.round(Math.random() * 96) + '%;animation-delay:' + (Math.random() * 0.5).toFixed(2) +
+        's;color:' + (i % 2 ? 'var(--bad)' : 'var(--gold)') + '">' + suits[i % 4] + '</span>';
+    }
+    box.innerHTML = html;
+    document.body.appendChild(box);
+    setTimeout(function () { box.remove(); }, 2400);
+  }
+
   // ---------- sheets ----------
 
   function openSheet(html) {
@@ -263,7 +369,11 @@
 
     save();
     closeSheet();
+    flash = {};
+    flash[id] = true;
+    if (src !== 'bank') flash[src] = true;
     render();
+    flash = {};
   }
 
   function leaveSheet(id, value) {
@@ -276,7 +386,7 @@
         '<label class="field" for="leave-chips">Chips they are leaving with</label>' +
         '<div class="row">' +
           '<input id="leave-chips" class="input num" inputmode="numeric" autocomplete="off" placeholder="0" data-focus value="' + esc(value == null ? '' : value) + '">' +
-          (chipDefs.length ? '<button type="button" class="btn" data-action="count" data-for="leave">Count</button>' : '') +
+          (chipDefs.length ? '<button type="button" class="btn" data-action="count" data-for="leave">' + icon('chip') + 'Count</button>' : '') +
         '</div>' +
         '<p class="muted small-text">' + money(onTable) + ' is on the table.</p>' +
         '<button type="submit" class="btn primary block">Confirm</button>' +
@@ -453,9 +563,9 @@
         savedNames() +
         (game.players.length
           ? '<ul class="list">' + game.players.map(function (p) {
-              return '<li><span class="name">' + esc(p.name) + '</span>' +
+              return '<li><div class="who av">' + avatar(p.name, true) + '<span class="name">' + esc(p.name) + '</span></div>' +
                 '<button type="button" class="btn small ghost" data-action="setup-remove" data-id="' + p.id + '">Remove</button></li>';
-            }).join('') + '</ul>'
+            }).join('') + '</ul><p class="muted small-text">Tap a player’s circle to add a photo.</p>'
           : '<p class="muted small-text">Add at least two players. Each starts with one buy-in from the bank.</p>') +
       '</section>' +
       '<button type="button" class="btn primary block" data-action="start">Start game</button>' +
@@ -473,7 +583,7 @@
           '<input id="chip-value" class="input num" inputmode="numeric" placeholder="Value" autocomplete="off" aria-label="Chip value">' +
           '<button type="submit" class="btn">Add</button>' +
         '</form>' +
-        (chipDefs.length ? '<button type="button" class="btn block" data-action="split">Split chips between players</button>' : '') +
+        (chipDefs.length ? '<button type="button" class="btn block" data-action="split">' + icon('chip') + 'Split chips between players</button>' : '') +
       '</section>';
   }
 
@@ -492,14 +602,15 @@
       '</div>' +
       '<section class="card">' +
         '<div class="spread"><h2>At the table</h2>' +
-          '<button type="button" class="btn small" data-action="add-player">Add player</button></div>' +
+          '<button type="button" class="btn small" data-action="add-player">' + icon('plus') + 'Add player</button></div>' +
         (seated.length
           ? '<ul class="list">' + seated.map(function (p) {
               const put = st.players[p.id].put;
               const sub = put < 0
-                ? '<span class="sub pos">' + esc(putLabel(put, game.buyIn)) + ' · profit locked ' + money(put) + '</span>'
-                : '<span class="sub">' + esc(putLabel(put, game.buyIn)) + '</span>';
-              return '<li><div class="who"><span class="name">' + esc(p.name) + '</span>' + sub + '</div>' +
+                ? '<span class="sub stake pos">' + esc(putLabel(put, game.buyIn)) + ' · locked ' + money(put) + '</span>'
+                : '<span class="sub stake">' + esc(putLabel(put, game.buyIn)) + '</span>';
+              return '<li' + (flash[p.id] ? ' class="flash"' : '') + '><div class="who av">' + avatar(p.name, true) +
+                '<span class="name">' + esc(p.name) + '</span>' + sub + '</div>' +
                 '<div class="acts">' +
                   '<button type="button" class="btn small primary" data-action="buyin" data-id="' + p.id + '">Buy-in</button>' +
                   '<button type="button" class="btn small ghost" data-action="leave" data-id="' + p.id + '">Leave</button>' +
@@ -511,21 +622,21 @@
         ? '<section class="card"><h2>Left</h2><ul class="list">' + left.map(function (p) {
             const s = st.players[p.id];
             const net = s.cashedOut - s.put;
-            return '<li><div class="who"><span class="name">' + esc(p.name) + '</span>' +
+            return '<li><div class="who av">' + avatar(p.name) + '<span class="name">' + esc(p.name) + '</span>' +
               '<span class="sub">left with ' + money(s.cashedOut) + ' · <span class="num ' + tone(net) + '">' + signed(net) + '</span></span></div>' +
               '<button type="button" class="btn small ghost" data-action="rejoin" data-id="' + p.id + '">Rejoin</button></li>';
           }).join('') + '</ul></section>'
         : '') +
       '<section class="card">' +
         '<div class="spread"><h2>Log</h2>' +
-          '<button type="button" class="btn small ghost" data-action="undo"' + (!last || last.start ? ' disabled' : '') + '>Undo last</button></div>' +
+          '<button type="button" class="btn small ghost" data-action="undo"' + (!last || last.start ? ' disabled' : '') + '>' + icon('undo') + 'Undo last</button></div>' +
         '<ul class="log">' + lines.map(function (l) {
           return '<li><span>' + esc(l.text) + '</span>' +
             '<button type="button" class="more" data-action="log-menu" data-eid="' + l.eid + '" aria-label="Change this entry">⋯</button></li>';
         }).join('') + '</ul>' +
       '</section>' +
       (Live.enabled
-        ? '<button type="button" class="btn block" data-action="live">' + (game.live ? 'Live link · on' : 'Live link') + '</button>'
+        ? '<button type="button" class="btn block" data-action="live">' + icon('link') + (game.live ? 'Live link · on' : 'Live link') + '</button>'
         : '') +
       '<button type="button" class="btn primary block" data-action="to-settle">End game and settle</button>' +
       '<button type="button" class="btn ghost danger block" data-action="discard">Discard game</button>';
@@ -565,14 +676,14 @@
         '<ul class="list">' + game.players.map(function (p) {
           const s = st.players[p.id];
           if (!s.seated) {
-            return '<li><div class="who"><span class="name">' + esc(p.name) + '</span><span class="sub">left earlier</span></div>' +
+            return '<li><div class="who av">' + avatar(p.name) + '<span class="name">' + esc(p.name) + '</span><span class="sub">left earlier</span></div>' +
               '<span class="num">' + money(s.cashedOut) + '</span></li>';
           }
           const v = game.finalChips[p.id];
-          return '<li><div class="who"><span class="name">' + esc(p.name) + '</span>' +
+          return '<li><div class="who av">' + avatar(p.name) + '<span class="name">' + esc(p.name) + '</span>' +
             '<span class="sub">' + esc(putLabel(s.put, game.buyIn)) + '</span></div>' +
             '<div class="acts">' +
-              (chipDefs.length ? '<button type="button" class="btn small ghost" data-action="count" data-for="settle" data-id="' + p.id + '">Count</button>' : '') +
+              (chipDefs.length ? '<button type="button" class="btn small ghost" data-action="count" data-for="settle" data-id="' + p.id + '" aria-label="Count chips for ' + esc(p.name) + '">' + icon('chip') + '</button>' : '') +
               '<input class="input chips-in num" inputmode="numeric" autocomplete="off" placeholder="chips" data-chips="' + p.id + '"' +
               ' aria-label="Final chips for ' + esc(p.name) + '" value="' + esc(v == null ? '' : v) + '">' +
             '</div></li>';
@@ -601,8 +712,11 @@
 
     if (d.complete) {
       const sorted = d.nets.slice().sort(function (a, b) { return b.amount - a.amount; });
-      html += '<section class="card"><h2>Results</h2><ul class="list">' + sorted.map(function (x) {
-        return '<li><span class="name">' + esc(playerName(x.id)) + '</span>' +
+      html += '<section class="card"><h2>Results</h2><ul class="list">' + sorted.map(function (x, i) {
+        const top = i === 0 && x.amount > 0;
+        return '<li' + (top ? ' class="top"' : '') + '><div class="who av">' + avatar(playerName(x.id)) +
+          '<span class="name">' + esc(playerName(x.id)) + '</span>' +
+          (top ? '<span class="sub winner">' + icon('trophy') + 'Winner</span>' : '') + '</div>' +
           '<span class="num ' + tone(x.amount) + '">' + signed(x.amount) + '</span></li>';
       }).join('') + '</ul></section>';
     }
@@ -611,7 +725,7 @@
       html += '<section class="card"><h2>Payments</h2>' + (d.payments.length
         ? '<ul class="list">' + d.payments.map(function (p) {
             const key = p.from + '>' + p.to;
-            return '<li><div class="who"><span class="name">' + esc(playerName(p.from)) + ' pays ' + esc(playerName(p.to)) + '</span>' +
+            return '<li><div class="who av">' + avatar(playerName(p.from)) + '<span class="name">' + esc(playerName(p.from)) + ' pays ' + esc(playerName(p.to)) + '</span>' +
               '<span class="sub num">' + money(p.amount) + '</span></div>' +
               '<label class="check small-text"><input type="checkbox" data-action="tick" data-key="' + key + '"' +
               (game.ticks[key] ? ' checked' : '') + '>Paid now</label></li>';
@@ -621,7 +735,7 @@
         '</section>';
     }
 
-    html += '<button type="button" class="btn block" data-action="share-result"' + (d.usable ? '' : ' disabled') + '>Share result</button>' +
+    html += '<button type="button" class="btn block" data-action="share-result"' + (d.usable ? '' : ' disabled') + '>' + icon('share') + 'Share result</button>' +
       '<button type="button" class="btn primary block" data-action="finish"' + (d.usable ? '' : ' disabled') + '>Finish game</button>';
     out.innerHTML = html;
   }
@@ -689,6 +803,7 @@
     closeSheet();
     render();
     toast('Game saved');
+    celebrate();
   }
 
   // ---------- debts tab ----------
@@ -700,11 +815,11 @@
   function debtRow(d) {
     const when = (d.combined ? 'combined ' : '') + fmtDate(d.gameDate);
     if (d.status === 'unpaid') {
-      return '<li><div class="who"><span class="name">' + esc(d.from) + ' owes ' + esc(d.to) + '</span>' +
+      return '<li><div class="who av">' + avatar(d.from) + '<span class="name">' + esc(d.from) + ' owes ' + esc(d.to) + '</span>' +
         '<span class="sub"><span class="num">' + money(d.amount) + '</span> · ' + esc(when) + '</span></div>' +
         '<button type="button" class="btn small primary" data-action="pay" data-id="' + esc(d.id) + '">Mark paid</button></li>';
     }
-    return '<li><div class="who"><span class="name">' + esc(d.from) + ' paid ' + esc(d.to) + '</span>' +
+    return '<li><div class="who av">' + avatar(d.from) + '<span class="name">' + esc(d.from) + ' paid ' + esc(d.to) + '</span>' +
       '<span class="sub"><span class="num">' + money(d.amount) + '</span> · paid ' + esc(fmtDate(d.paidDate)) + '</span></div>' +
       '<div class="acts">' +
         '<button type="button" class="btn small ghost" data-action="unmark" data-id="' + esc(d.id) + '">Undo</button>' +
@@ -734,7 +849,7 @@
             const parts = [];
             if (t.owes) parts.push('<span class="neg">owes <span class="num">' + money(t.owes) + '</span></span>');
             if (t.owed) parts.push('<span class="pos">is owed <span class="num">' + money(t.owed) + '</span></span>');
-            return '<li><div class="who"><span class="name">' + esc(n) + '</span><span class="sub">' + parts.join(' · ') + '</span></div>' +
+            return '<li><div class="who av">' + avatar(n) + '<span class="name">' + esc(n) + '</span><span class="sub">' + parts.join(' · ') + '</span></div>' +
               (t.owes ? '<button type="button" class="btn small ghost" data-action="remind" data-name="' + esc(n) + '">Remind</button>' : '') +
               '</li>';
           }).join('') + '</ul></section>'
@@ -742,7 +857,7 @@
       '<section class="card">' +
         '<div class="spread"><h2>Unpaid</h2><div class="acts">' +
           (simpler ? '<button type="button" class="btn small" data-action="simplify">Simplify</button>' : '') +
-          (unpaid.length ? '<button type="button" class="btn small ghost" data-action="share-unpaid">Share</button>' : '') +
+          (unpaid.length ? '<button type="button" class="btn small ghost" data-action="share-unpaid">' + icon('share') + 'Share</button>' : '') +
         '</div></div>' +
         (unpaid.length
           ? '<ul class="list">' + unpaid.map(debtRow).join('') + '</ul>'
@@ -754,10 +869,10 @@
           : '<p class="muted small-text">Nothing paid yet.</p>') +
       '</section>' +
       '<section class="card"><h2>Backup</h2>' +
-        '<p class="muted small-text">Debts, history and chip values are stored only on this phone. Export a backup to keep a copy or move to another phone.</p>' +
+        '<p class="muted small-text">Debts, history, chip values and photos are stored only on this phone. Export a backup to keep a copy or move to another phone.</p>' +
         '<div class="row">' +
-          '<button type="button" class="btn grow" data-action="export">Export</button>' +
-          '<button type="button" class="btn grow" data-action="import">Import</button>' +
+          '<button type="button" class="btn grow" data-action="export">' + icon('down') + 'Export</button>' +
+          '<button type="button" class="btn grow" data-action="import">' + icon('up') + 'Import</button>' +
         '</div>' +
       '</section>';
   }
@@ -788,7 +903,9 @@
 
     if (histView === 'board') {
       return seg + '<section class="card"><h2>All games</h2><ul class="list">' + Logic.leaderboard(history).map(function (r, i) {
-        return '<li><div class="who"><span class="name">' + (i + 1) + '. ' + esc(r.name) + '</span>' +
+        const medal = r.total > 0 && i < 3 ? ' m' + (i + 1) : '';
+        return '<li' + (medal === ' m1' ? ' class="top"' : '') + '><span class="medal' + medal + '">' + (i + 1) + '</span>' +
+          '<div class="who av grow">' + avatar(r.name) + '<span class="name">' + esc(r.name) + '</span>' +
           '<span class="sub">' + r.games + (r.games === 1 ? ' game' : ' games') +
           ' · best <span class="num">' + signed(r.best) + '</span> · worst <span class="num">' + signed(r.worst) + '</span></span></div>' +
           '<span class="num ' + tone(r.total) + '">' + signed(r.total) + '</span></li>';
@@ -799,7 +916,9 @@
       const top = g.players.slice().sort(function (a, b) { return b.net - a.net; })[0];
       return '<li><div class="who"><span class="name">' + esc(fmtDate(g.date)) + '</span>' +
         '<span class="sub">' + g.players.length + ' players' +
-        (top && top.net > 0 ? ' · ' + esc(top.name) + ' <span class="num">' + signed(top.net) + '</span>' : '') + '</span></div>' +
+        (top && top.net > 0
+          ? ' · <span class="winner">' + icon('trophy') + esc(top.name) + ' <span class="num">' + signed(top.net) + '</span></span>'
+          : '') + '</span></div>' +
         '<button type="button" class="btn small ghost" data-action="hist-open" data-id="' + esc(g.id) + '">View</button></li>';
     }).join('') + '</ul></section>';
   }
@@ -808,8 +927,9 @@
     ctx = { kind: 'history', id: g.id };
     openSheet(
       '<p class="sheet-title">' + esc(fmtDate(g.date)) + ' · buy-in ' + money(g.buyIn) + '</p>' +
-      '<h2>Results</h2><ul class="list">' + g.players.slice().sort(function (a, b) { return b.net - a.net; }).map(function (p) {
-        return '<li><div class="who"><span class="name">' + esc(p.name) + '</span>' +
+      '<h2>Results</h2><ul class="list">' + g.players.slice().sort(function (a, b) { return b.net - a.net; }).map(function (p, i) {
+        return '<li' + (i === 0 && p.net > 0 ? ' class="top"' : '') + '><div class="who av">' + avatar(p.name) +
+          '<span class="name">' + esc(p.name) + '</span>' +
           '<span class="sub num">in ' + money(p.put) + ' · out ' + money(p.out) + '</span></div>' +
           '<span class="num ' + tone(p.net) + '">' + signed(p.net) + '</span></li>';
       }).join('') + '</ul>' +
@@ -819,7 +939,7 @@
           }).join('') + '</ul>'
         : '<p class="muted small-text">Nobody owed anything.</p>') +
       '<h2>Log</h2><ul class="log">' + g.log.map(function (t) { return '<li><span>' + esc(t) + '</span></li>'; }).join('') + '</ul>' +
-      '<button type="button" class="btn block" data-action="hist-share">Share</button>' +
+      '<button type="button" class="btn block" data-action="hist-share">' + icon('share') + 'Share</button>' +
       '<button type="button" class="btn ghost danger block" data-action="hist-delete">Delete this game</button>' +
       '<button type="button" class="btn ghost block" data-action="close-sheet">Close</button>'
     );
@@ -874,7 +994,7 @@
     openSheet(
       '<p class="sheet-title">Live link is on</p>' +
       '<textarea class="input link-box" readonly rows="3">' + esc(liveLink()) + '</textarea>' +
-      '<button type="button" class="btn primary block" data-action="live-share">Share link</button>' +
+      '<button type="button" class="btn primary block" data-action="live-share">' + icon('share') + 'Share link</button>' +
       '<button type="button" class="btn ghost danger block" data-action="live-stop">Stop sharing</button>' +
       '<button type="button" class="btn ghost block" data-action="close-sheet">Close</button>'
     );
@@ -905,7 +1025,7 @@
       '</div>' +
       (s.results
         ? '<section class="card"><h2>Results</h2><ul class="list">' + s.results.map(function (r) {
-            return '<li><span class="name">' + esc(r.name) + '</span><span class="num ' + tone(r.net) + '">' + signed(r.net) + '</span></li>';
+            return '<li><div class="who av">' + avatar(r.name) + '<span class="name">' + esc(r.name) + '</span></div><span class="num ' + tone(r.net) + '">' + signed(r.net) + '</span></li>';
           }).join('') + '</ul></section>' +
           '<section class="card"><h2>Payments</h2>' + ((s.payments || []).length
             ? '<ul class="list">' + s.payments.map(function (p) {
@@ -915,14 +1035,14 @@
         : '') +
       '<section class="card"><h2>At the table</h2>' + (seated.length
         ? '<ul class="list">' + seated.map(function (p) {
-            return '<li><span class="name">' + esc(p.name) + '</span>' +
+            return '<li><div class="who av">' + avatar(p.name) + '<span class="name">' + esc(p.name) + '</span></div>' +
               '<span class="' + (p.put < 0 ? 'pos' : 'muted') + '">' + esc(putLabel(p.put, s.buyIn)) + '</span></li>';
           }).join('') + '</ul>'
         : '<p class="muted small-text">Nobody is at the table.</p>') + '</section>' +
       (left.length
         ? '<section class="card"><h2>Left</h2><ul class="list">' + left.map(function (p) {
             const net = p.cashedOut - p.put;
-            return '<li><div class="who"><span class="name">' + esc(p.name) + '</span>' +
+            return '<li><div class="who av">' + avatar(p.name) + '<span class="name">' + esc(p.name) + '</span>' +
               '<span class="sub">left with ' + money(p.cashedOut) + '</span></div>' +
               '<span class="num ' + tone(net) + '">' + signed(net) + '</span></li>';
           }).join('') + '</ul></section>'
@@ -952,7 +1072,7 @@
   }
 
   function exportBackup() {
-    const data = JSON.stringify(Store.exportData(debts, names, history, chipDefs), null, 2);
+    const data = JSON.stringify(Store.exportData(debts, names, history, chipDefs, photos), null, 2);
     const name = 'poker-backup-' + todayISO() + '.json';
     let file = null;
     try { file = new File([data], name, { type: 'application/json' }); } catch (e) { file = null; }
@@ -973,20 +1093,22 @@
 
   function importBackup(text) {
     const data = Store.parseBackup(text);
-    if (!data) { toast('That file is not a Poker Tracker backup'); return; }
+    if (!data) { toast('That file is not a PokerSplit backup'); return; }
     confirmSheet(
       'Import backup',
-      'This replaces the debts, history and chip values on this phone (' + debts.length + ' debts, ' + history.length +
+      'This replaces the debts, history, chip values and photos on this phone (' + debts.length + ' debts, ' + history.length +
         ' games) with the backup (' + data.debts.length + ' debts, ' + data.history.length + ' games).',
       'Replace',
       function () {
         debts = data.debts;
         history = data.history;
         chipDefs = data.chips;
+        photos = data.photos;
         names = [];
         Store.saveDebts(debts);
         Store.saveHistory(history);
         Store.saveChips(chipDefs);
+        Store.savePhotos(photos);
         rememberNames(data.names);
         closeSheet();
         render();
@@ -1053,7 +1175,17 @@
     'name-forget': function (el) {
       names = names.filter(function (n) { return n !== el.dataset.name; });
       Store.saveNames(names);
+      delete photos[el.dataset.name.toLowerCase()];
+      Store.savePhotos(photos);
       if (!names.length) editNames = false;
+      render();
+    },
+    'photo': function (el) { photoSheet(el.dataset.name); },
+    'photo-pick': function () { photoInput.click(); },
+    'photo-remove': function () {
+      delete photos[ctx.name.toLowerCase()];
+      Store.savePhotos(photos);
+      closeSheet();
       render();
     },
     'split': splitSheet,
@@ -1398,6 +1530,12 @@
     reader.onload = function () { importBackup(String(reader.result)); };
     reader.onerror = function () { toast('Could not read that file'); };
     reader.readAsText(file);
+  });
+
+  photoInput.addEventListener('change', function () {
+    const file = photoInput.files && photoInput.files[0];
+    photoInput.value = '';
+    if (file && ctx && ctx.kind === 'photo') savePhoto(file, ctx.name);
   });
 
   window.addEventListener('beforeinstallprompt', function (e) {

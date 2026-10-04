@@ -23,6 +23,15 @@
     return Array.prototype.map.call(bytes, function (b) { return (b < 16 ? '0' : '') + b.toString(16); }).join('');
   }
 
+  // Every write carries a fresh nonce `n` and `sig` = owner key + nonce. The
+  // database rules require the nonce to change and the sig to match the stored
+  // key, so a write that touches only part of the node (which would inherit
+  // the stored key) is refused. Only `state` is readable.
+  function signed(key, state) {
+    const n = randomHex();
+    return { owner: key, n: n, sig: key + n, state: state };
+  }
+
   function schedule(ms) {
     clearTimeout(timer);
     timer = setTimeout(flush, ms);
@@ -38,7 +47,7 @@
     fetch(url(job.id), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ owner: job.key, state: JSON.stringify(job.state) })
+      body: JSON.stringify(signed(job.key, JSON.stringify(job.state)))
     })
       .then(function (res) { if (!res.ok) throw new Error('HTTP ' + res.status); })
       .catch(function () {

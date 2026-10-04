@@ -1,4 +1,4 @@
-# Poker Tracker: implementation plan
+# PokerSplit: implementation plan
 
 An installable web app (PWA) for Android and iPhone that tracks home poker buy-ins, settles up in the fewest payments, and keeps a record of paid and unpaid debts.
 
@@ -192,7 +192,8 @@ Built on top of the plan above. Where the two differ, this section is current.
 | Debts | Part payments; "Simplify" nets all unpaid debts into the fewest payments (`Logic.combineDebts`); "Remind" shares one person's outstanding total. |
 | History | Finished games are kept (`pt.history`) in a third tab with a per-game view and a leaderboard (`Logic.leaderboard`). Backups are version 2 and include history and chip values; version 1 files still import. |
 | Live view | Optional read-only link for the other players (`live.js`, `config.js`, `firebase-rules.json`). Off until a database URL is set. |
-| Names | A name is remembered when a game starts or finishes, so an undone mid-game join leaves nothing behind. |
+| Look | One dark "casino table" theme: green felt, gold accents, serif title. Player avatars (initials on a colour taken from the name, or a photo added by tapping the circle on the setup or game screen; stored in `pt.photos`, included in version 3 backups, never sent to the live view). Icons on tabs and main buttons, sheet and press animations, a short fall of card suits when a game finishes, a highlighted winner on the settle and history screens and medals on the leaderboard. Motion is off under reduced-motion. |
+| Names | Saved names can be removed with "Edit saved names" on the setup screen (this also removes that name's photo). A name is remembered when a game starts or finishes, so an undone mid-game join leaves nothing behind. |
 
 ## Status
 
@@ -200,7 +201,7 @@ Built on top of the plan above. Where the two differ, this section is current.
 |---|---|
 | Logic tests (`node tests/logic.test.js`) | Passing |
 | Phases 1 to 5 in the browser at 375 × 812 | Verified |
-| Live view | Verified against a local stand-in that applies the same checks as `firebase-rules.json`: updates reach the viewer, a write with the wrong owner key is refused, the scorer catches up after the database was unreachable. **Not yet run against a real Firebase database.** |
+| Live view | On, and verified against the real Firebase database: updates reach a viewer tab within a few seconds, the scorer catches up after losing the connection, "Stop sharing" ends the view, and forged, partial, oversized and out-of-place writes are refused by the published rules. |
 | Real phone | Not done: share sheet, file export/import dialogs, install prompt |
 | Hosting | Not done |
 

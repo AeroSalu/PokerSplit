@@ -1,13 +1,13 @@
 {
-  "name": "Poker Tracker",
-  "short_name": "Poker",
+  "name": "PokerSplit",
+  "short_name": "PokerSplit",
   "description": "Track home poker buy-ins, settle up in the fewest payments, and keep a record of who still owes whom.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#1f7a4d",
-  "theme_color": "#1f7a4d",
+  "background_color": "#062016",
+  "theme_color": "#05160f",
   "icons": [
     { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
     { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },

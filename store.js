@@ -3,7 +3,7 @@
 (function (root) {
   'use strict';
 
-  const KEYS = { game: 'pt.game', debts: 'pt.debts', names: 'pt.names', history: 'pt.history', chips: 'pt.chips' };
+  const KEYS = { game: 'pt.game', debts: 'pt.debts', names: 'pt.names', history: 'pt.history', chips: 'pt.chips', photos: 'pt.photos' };
 
   function read(key, fallback) {
     try {
@@ -69,8 +69,19 @@
     return { name: c.name, value: c.value, count: isNum(c.count) && c.count > 0 ? Math.floor(c.count) : 0 };
   }
 
-  // Returns { debts, names, history, chips } or null if the file is not a
-  // backup of this app. Version 1 files have no history or chips.
+  // Photos are small image data URLs keyed by lower-cased player name.
+  function cleanPhotos(map) {
+    const out = {};
+    if (!map || typeof map !== 'object') return out;
+    Object.keys(map).forEach(function (key) {
+      const v = map[key];
+      if (isStr(v) && /^data:image\/(jpeg|png|webp);base64,/.test(v) && v.length < 60000) out[key.toLowerCase()] = v;
+    });
+    return out;
+  }
+
+  // Returns { debts, names, history, chips, photos } or null if the file is
+  // not a backup of this app. Older versions lack the later fields.
   function parseBackup(text) {
     let data;
     try {
@@ -83,7 +94,8 @@
       debts: data.debts.map(cleanDebt).filter(Boolean),
       names: list(data.names).filter(function (n) { return isStr(n) && n.trim(); }),
       history: list(data.history).map(cleanRecord).filter(Boolean),
-      chips: list(data.chips).map(cleanChip).filter(Boolean)
+      chips: list(data.chips).map(cleanChip).filter(Boolean),
+      photos: cleanPhotos(data.photos)
     };
   }
 
@@ -99,17 +111,20 @@
     saveHistory: function (history) { write(KEYS.history, history); },
     loadChips: function () { return list(read(KEYS.chips, [])).map(cleanChip).filter(Boolean); },
     saveChips: function (chips) { write(KEYS.chips, chips); },
+    loadPhotos: function () { return cleanPhotos(read(KEYS.photos, {})); },
+    savePhotos: function (photos) { write(KEYS.photos, photos); },
     getFlag: function (name) { return read('pt.flag.' + name, false); },
     setFlag: function (name) { write('pt.flag.' + name, true); },
-    exportData: function (debts, names, history, chips) {
+    exportData: function (debts, names, history, chips, photos) {
       return {
         app: 'poker-tracker',
-        version: 2,
+        version: 3,
         exported: new Date().toISOString(),
         debts: debts,
         names: names,
         history: history,
-        chips: chips
+        chips: chips,
+        photos: photos || {}
       };
     },
     parseBackup: parseBackup

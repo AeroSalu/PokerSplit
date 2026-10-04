@@ -4,10 +4,16 @@
     ".write": false,
     "live": {
       "$id": {
-        ".write": "!data.exists() || data.child('owner').val() === newData.child('owner').val()",
-        ".validate": "newData.hasChildren(['owner', 'state']) && $id.matches(/^[a-f0-9]{32}$/)",
+        ".write": "!data.exists() || (newData.child('owner').val() === data.child('owner').val() && newData.child('n').val() !== data.child('n').val() && newData.child('sig').val() === data.child('owner').val() + newData.child('n').val())",
+        ".validate": "newData.hasChildren(['owner', 'n', 'sig', 'state']) && $id.matches(/^[a-f0-9]{32}$/) && newData.child('sig').val() === newData.child('owner').val() + newData.child('n').val()",
         "owner": {
           ".validate": "newData.isString() && newData.val().length === 32"
+        },
+        "n": {
+          ".validate": "newData.isString() && newData.val().length === 32"
+        },
+        "sig": {
+          ".validate": "newData.isString() && newData.val().length === 64"
         },
         "state": {
           ".read": true,
